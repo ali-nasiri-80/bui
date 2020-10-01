@@ -762,25 +762,11 @@ func cflags(ctx variableAssignmentContext) error {
 	return includeVariableNow(bpVariable{"cflags", bpparser.ListType}, ctx)
 }
 
-func protoOutputParams(ctx variableAssignmentContext) error {
-	// The Soong replacement for LOCAL_PROTO_JAVA_OUTPUT_PARAMS doesn't need ","
+func exportCflags(ctx variableAssignmentContext) error {
+	// The Soong replacement for EXPORT_CFLAGS doesn't need the same extra escaped quotes that were present in Make
 	ctx.mkvalue = ctx.mkvalue.Clone()
-	ctx.mkvalue.ReplaceLiteral(`, `, ` `)
-	return includeVariableNow(bpVariable{"proto.output_params", bpparser.ListType}, ctx)
-}
-
-func protoLocalIncludeDirs(ctx variableAssignmentContext) error {
-	// The Soong replacement for LOCAL_PROTOC_FLAGS includes "--proto_path=$(LOCAL_PATH)/..."
-	ctx.mkvalue = ctx.mkvalue.Clone()
-	if len(ctx.mkvalue.Strings) >= 1 && strings.Contains(ctx.mkvalue.Strings[0], "--proto_path=") {
-		ctx.mkvalue.Strings[0] = strings.Replace(ctx.mkvalue.Strings[0], "--proto_path=", "", 1)
-		paths, err := localizePaths(ctx)
-		if err == nil {
-			err = setVariable(ctx.file, ctx.append, ctx.prefix, "proto.local_include_dirs", paths, true)
-		}
-		return err
-	}
-	return fmt.Errorf("Currently LOCAL_PROTOC_FLAGS only support with value '--proto_path=$(LOCAL_PATH)/...'")
+	ctx.mkvalue.ReplaceLiteral(`\"`, `"`)
+	return includeVariableNow(bpVariable{"export_cflags", bpparser.ListType}, ctx)
 }
 
 func proguardEnabled(ctx variableAssignmentContext) error {
