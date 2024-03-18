@@ -3252,6 +3252,11 @@ func (module *sdkLibraryXml) SubDir() string {
 	return "permissions"
 }
 
+// from android.PrebuiltEtcModule
+func (module *sdkLibraryXml) OutputFiles(tag string) (android.Paths, error) {
+	return android.OutputPaths{module.outputFilePath}.Paths(), nil
+}
+
 var _ etc.PrebuiltEtcModule = (*sdkLibraryXml)(nil)
 
 // from android.ApexModule

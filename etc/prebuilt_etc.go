@@ -74,11 +74,11 @@ var PrepareForTestWithPrebuiltEtc = android.FixtureRegisterWithContext(RegisterP
 type prebuiltEtcProperties struct {
 	// Source file of this prebuilt. Can reference a genrule type module with the ":module" syntax.
 	// Mutually exclusive with srcs.
-	Src proptools.Configurable[string] `android:"path,arch_variant,replace_instead_of_append"`
+	Src *string `android:"path,arch_variant"`
 
 	// Source files of this prebuilt. Can reference a genrule type module with the ":module" syntax.
 	// Mutually exclusive with src. When used, filename_from_src is set to true.
-	Srcs proptools.Configurable[[]string] `android:"path,arch_variant"`
+	Srcs []string `android:"path,arch_variant"`
 
 	// Optional name for the installed file. If unspecified, name of the module is used as the file
 	// name. Only available when using a single source (src).
@@ -133,6 +133,10 @@ type PrebuiltEtcModule interface {
 
 	// Returns the sub install directory relative to BaseDir().
 	SubDir() string
+
+	// Returns an android.OutputPath to the intermediate file, which is the renamed prebuilt source
+	// file.
+	OutputFiles(tag string) (android.Paths, error)
 }
 
 type PrebuiltEtc struct {
@@ -245,10 +249,10 @@ func (p *PrebuiltEtc) SetImageVariation(ctx android.BaseModuleContext, variation
 }
 
 func (p *PrebuiltEtc) SourceFilePath(ctx android.ModuleContext) android.Path {
-	if len(p.properties.Srcs.GetOrDefault(ctx, nil)) > 0 {
+	if len(p.properties.Srcs) > 0 {
 		panic(fmt.Errorf("SourceFilePath not available on multi-source prebuilt %q", p.Name()))
 	}
-	return android.PathForModuleSrc(ctx, p.properties.Src.GetOrDefault(ctx, ""))
+	return android.PathForModuleSrc(ctx, proptools.String(p.properties.Src))
 }
 
 func (p *PrebuiltEtc) InstallDirPath() android.InstallPath {
@@ -262,8 +266,20 @@ func (p *PrebuiltEtc) SetAdditionalDependencies(paths android.Paths) {
 }
 
 func (p *PrebuiltEtc) OutputFile() android.OutputPath {
-	if p.usedSrcsProperty {
+	if len(p.properties.Srcs) > 0 {
 		panic(fmt.Errorf("OutputFile not available on multi-source prebuilt %q", p.Name()))
+	}
+	return p.outputFilePaths[0]
+}
+
+var _ android.OutputFileProducer = (*PrebuiltEtc)(nil)
+
+func (p *PrebuiltEtc) OutputFiles(tag string) (android.Paths, error) {
+	switch tag {
+	case "":
+		return p.outputFilePaths.Paths(), nil
+	default:
+		return nil, fmt.Errorf("unsupported module reference tag %q", tag)
 	}
 	return p.outputFilePaths[0]
 }
@@ -303,12 +319,26 @@ func (p *PrebuiltEtc) installBaseDir(ctx android.ModuleContext) string {
 	return installBaseDir
 }
 
+func (p *PrebuiltEtc) installBaseDir(ctx android.ModuleContext) string {
+	// If soc install dir was specified and SOC specific is set, set the installDirPath to the
+	// specified socInstallDirBase.
+	installBaseDir := p.installDirBase
+	if p.Target().Arch.ArchType.Multilib == "lib64" && p.installDirBase64 != "" {
+		installBaseDir = p.installDirBase64
+	}
+	if p.SocSpecific() && p.socInstallDirBase != "" {
+		installBaseDir = p.socInstallDirBase
+	}
+	if p.installAvoidMultilibConflict && !ctx.Host() && ctx.Config().HasMultilibConflict(ctx.Arch().ArchType) {
+		installBaseDir = filepath.Join(installBaseDir, ctx.Arch().ArchType.String())
+	}
+	return installBaseDir
+}
+
 func (p *PrebuiltEtc) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	var installs []installProperties
 
-	srcProperty := p.properties.Src.Get(ctx)
-	srcsProperty := p.properties.Srcs.GetOrDefault(ctx, nil)
-	if srcProperty.IsPresent() && len(srcsProperty) > 0 {
+	if p.properties.Src != nil && len(p.properties.Srcs) > 0 {
 		ctx.PropertyErrorf("src", "src is set. Cannot set srcs")
 	}
 
@@ -320,8 +350,8 @@ func (p *PrebuiltEtc) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 
 	filename := proptools.String(p.properties.Filename)
 	filenameFromSrc := proptools.Bool(p.properties.Filename_from_src)
-	if srcProperty.IsPresent() {
-		p.sourceFilePaths = android.PathsForModuleSrc(ctx, []string{srcProperty.Get()})
+	if p.properties.Src != nil {
+		p.sourceFilePaths = android.PathsForModuleSrc(ctx, []string{proptools.String(p.properties.Src)})
 		// If the source was not found, set a fake source path to
 		// support AllowMissingDependencies executions.
 		if len(p.sourceFilePaths) == 0 {
@@ -356,8 +386,7 @@ func (p *PrebuiltEtc) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 			symlinks:       p.properties.Symlinks,
 		}
 		installs = append(installs, ip)
-	} else if len(srcsProperty) > 0 {
-		p.usedSrcsProperty = true
+	} else if len(p.properties.Srcs) > 0 {
 		if filename != "" {
 			ctx.PropertyErrorf("filename", "filename cannot be set when using srcs")
 		}
@@ -367,7 +396,7 @@ func (p *PrebuiltEtc) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 		if p.properties.Filename_from_src != nil {
 			ctx.PropertyErrorf("filename_from_src", "filename_from_src is implicitly set to true when using srcs")
 		}
-		p.sourceFilePaths = android.PathsForModuleSrc(ctx, srcsProperty)
+		p.sourceFilePaths = android.PathsForModuleSrc(ctx, p.properties.Srcs)
 		for _, src := range p.sourceFilePaths {
 			filename := src.Base()
 			output := android.PathForModuleOut(ctx, filename).OutputPath
@@ -409,8 +438,6 @@ func (p *PrebuiltEtc) GenerateAndroidBuildActions(ctx android.ModuleContext) {
 	for _, ip := range installs {
 		ip.addInstallRules(ctx)
 	}
-
-	ctx.SetOutputFiles(p.outputFilePaths.Paths(), "")
 }
 
 type installProperties struct {
@@ -704,4 +731,122 @@ func PrebuiltRFSAFactory() android.Module {
 	android.InitAndroidArchModule(module, android.DeviceSupported, android.MultilibFirst)
 	android.InitDefaultableModule(module)
 	return module
+}
+
+// Copy file into the snapshot
+func copyFile(ctx android.SingletonContext, path android.Path, out string, fake bool) android.OutputPath {
+	if fake {
+		// Create empty file instead for the fake snapshot
+		return snapshot.WriteStringToFileRule(ctx, "", out)
+	} else {
+		return snapshot.CopyFileRule(pctx, ctx, path, out)
+	}
+}
+
+// Check if the module is target of the snapshot
+func isSnapshotAware(ctx android.SingletonContext, m *PrebuiltEtc, image snapshot.SnapshotImage) bool {
+	if !m.Enabled() {
+		return false
+	}
+
+	// Skip if the module is not included in the image
+	if !image.InImage(m)() {
+		return false
+	}
+
+	// When android/prebuilt.go selects between source and prebuilt, it sets
+	// HideFromMake on the other one to avoid duplicate install rules in make.
+	if m.IsHideFromMake() {
+		return false
+	}
+
+	// There are some prebuilt_etc module with multiple definition of same name.
+	// Check if the target would be included from the build
+	if !m.ExportedToMake() {
+		return false
+	}
+
+	// Skip if the module is in the predefined path list to skip
+	if image.IsProprietaryPath(ctx.ModuleDir(m), ctx.DeviceConfig()) {
+		return false
+	}
+
+	// Skip if the module should be excluded
+	if image.ExcludeFromSnapshot(m) || image.ExcludeFromDirectedSnapshot(ctx.DeviceConfig(), m.BaseModuleName()) {
+		return false
+	}
+
+	// Skip from other exceptional cases
+	if m.Target().Os.Class != android.Device {
+		return false
+	}
+	if m.Target().NativeBridge == android.NativeBridgeEnabled {
+		return false
+	}
+
+	return true
+}
+
+func generatePrebuiltSnapshot(s snapshot.SnapshotSingleton, ctx android.SingletonContext, snapshotArchDir string) snapshot.SnapshotPaths {
+	/*
+		Snapshot zipped artifacts directory structure for etc modules:
+		{SNAPSHOT_ARCH}/
+			arch-{TARGET_ARCH}-{TARGET_ARCH_VARIANT}/
+				etc/
+					(prebuilt etc files)
+			arch-{TARGET_2ND_ARCH}-{TARGET_2ND_ARCH_VARIANT}/
+				etc/
+					(prebuilt etc files)
+			NOTICE_FILES/
+				(notice files)
+	*/
+	var snapshotOutputs android.Paths
+	var snapshotNotices android.Paths
+	installedNotices := make(map[string]bool)
+
+	ctx.VisitAllModules(func(module android.Module) {
+		m, ok := module.(*PrebuiltEtc)
+		if !ok {
+			return
+		}
+
+		if !isSnapshotAware(ctx, m, s.Image) {
+			return
+		}
+
+		targetArch := "arch-" + m.Target().Arch.ArchType.String()
+
+		snapshotLibOut := filepath.Join(snapshotArchDir, targetArch, "etc", m.BaseModuleName())
+		outputs, _ := m.OutputFiles("")
+		for _, output := range outputs {
+			cp := copyFile(ctx, output, snapshotLibOut, s.Fake)
+			snapshotOutputs = append(snapshotOutputs, cp)
+		}
+
+		prop := snapshot.SnapshotJsonFlags{}
+		propOut := snapshotLibOut + ".json"
+		prop.InitBaseSnapshotProps(m)
+		prop.RelativeInstallPath = m.SubDir()
+
+		if m.properties.Filename != nil {
+			prop.Filename = *m.properties.Filename
+		}
+
+		j, err := json.Marshal(prop)
+		if err != nil {
+			ctx.Errorf("json marshal to %q failed: %#v", propOut, err)
+			return
+		}
+		snapshotOutputs = append(snapshotOutputs, snapshot.WriteStringToFileRule(ctx, string(j), propOut))
+
+		for _, notice := range m.EffectiveLicenseFiles() {
+			if _, ok := installedNotices[notice.String()]; !ok {
+				installedNotices[notice.String()] = true
+				snapshotNotices = append(snapshotNotices, notice)
+			}
+		}
+
+	})
+
+	return snapshot.SnapshotPaths{OutputFiles: snapshotOutputs, NoticeFiles: snapshotNotices}
 }
